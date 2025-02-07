@@ -4,3 +4,5 @@ langchain
 python-dotenv
 pymongo
 langchain-mistralai
+langchain-groq
+bcrypt

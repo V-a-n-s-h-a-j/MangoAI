@@ -3,7 +3,11 @@ from pydantic import BaseModel
 from bson import ObjectId
 # from response import generate_response
 from response_w_prompt_chain import respond
-import datetime
+from response_w_prompt_chain import generate_chat_title
+import datetime, timedelta
+import bcrypt
+import jwt
+import uuid
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -32,7 +36,57 @@ try:
 except Exception as e:
     print("Connection failed:", e)
 db = client["MangoAI"]
+users_collection = db["Users"]
 collection = db["ChatHistories"]
+
+# Hash password
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+# Verify password
+def verify_password(password: str, hashed_password: str) -> bool:
+    return bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8'))
+
+SECRET_KEY = "skdjflaisjfvbliequoskdnc"
+ALGORITHM = "HS256"
+
+
+def create_jwt_token(user_id: str):
+    payload = {"user_id": user_id, "exp": datetime.utcnow() + timedelta(days=7)}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+# User Schema
+class UserSignup(BaseModel):
+    name: str
+    email: str
+    password: str
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+@app.post("/signup/")
+def signup(user: UserSignup):
+    if users_collection.find_one({"email": user.email}):
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    hashed_password = hash_password(user.password)
+    new_user = {"name": user.name, "email": user.email, "password": hashed_password}
+    result = users_collection.insert_one(new_user)
+    
+    token = create_jwt_token(str(result.inserted_id))
+    return {"message": "User created successfully", "token": token}
+
+@app.post("/login/")
+def login(user: UserLogin):
+    existing_user = users_collection.find_one({"email": user.email})
+    if not existing_user or not verify_password(user.password, existing_user["password"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    token = create_jwt_token(str(existing_user["_id"]))
+    return {"message": "Login successful", "token": token}
+
 
 # Function to convert MongoDB ObjectId to string
 def serialize_chat(chat):
@@ -76,16 +130,24 @@ async def query_response(input_data: TextQuery):
     print("end------------------------------------------------>")
     history.append({"role": "user", "content": query})
 
+    if len(history) == 2 and chat_data.get("title", "Untitled Chat") == "Untitled Chat":
+        chat_title = generate_chat_title(query)
+        
+        # Update chat title in MongoDB
+        collection.update_one(
+            {"_id": ObjectId(thread_id)},
+            {"$set": {"title": chat_title}}
+        )
+
     response = respond(history)
     history.append({"role": "ai", "content": response})
 
     collection.update_one(
         {"_id": ObjectId(thread_id)},
-        {"$set": {"history": history}}
+        {"$set": {"history": history}},
     )
 
     return {"response": response, "history": history}
-
 
 
 # Define Request Body Schema (No thread_id in input)
@@ -100,6 +162,7 @@ def create_chat(chat: ChatCreateRequest):
     chat_data = {
         "uuid": chat.uuid,
         "history": chat.history,
+        "title" : "Untitled Chat",
         # "created_at": datetime.datetime.now(),
     }
     # Insert into MongoDB
